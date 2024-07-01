@@ -2,13 +2,11 @@ import argparse
 
 import torch
 import torch.distributed as dist
-from colossal_moe.models.mixtral_checkpoint import MixtralMoEHybridParallelCheckpointIO
-from colossal_moe.models.mixtral_policy import MixtralForCausalLMPolicy
-from colossal_moe.utils import load_checkpoint, move_to_cuda, save_checkpoint
 from torch.utils.data import Dataset
 from tqdm import tqdm
 from transformers import AutoTokenizer
 from transformers.models.mixtral import MixtralForCausalLM
+from utils import load_checkpoint, move_to_cuda, save_checkpoint
 
 import colossalai
 from colossalai.booster import Booster
@@ -145,7 +143,7 @@ def main():
     args = parse_args()
 
     # Launch ColossalAI
-    colossalai.launch_from_torch(config={}, seed=args.seed)
+    colossalai.launch_from_torch(seed=args.seed)
     coordinator = DistCoordinator()
 
     # Set plugin
@@ -155,12 +153,10 @@ def main():
             pp_size=args.pp_size,
             ep_size=args.ep_size,
             microbatch_size=args.microbatch_size,
-            custom_policy=MixtralForCausalLMPolicy(),
             enable_fused_normalization=args.use_layernorm_kernel,
             enable_jit_fused=args.use_kernel,
             precision=args.precision,
             zero_stage=args.zero_stage,
-            checkpoint_io=MixtralMoEHybridParallelCheckpointIO,
         )
 
     else:
@@ -195,9 +191,9 @@ def main():
     lr_scheduler = CosineAnnealingWarmupLR(
         optimizer=optimizer,
         total_steps=args.num_epochs * len(dataloader),
-        warmup_steps=args.warmup_steps
-        if args.warmup_steps is not None
-        else int(args.num_epochs * len(dataloader) * 0.025),
+        warmup_steps=(
+            args.warmup_steps if args.warmup_steps is not None else int(args.num_epochs * len(dataloader) * 0.025)
+        ),
         eta_min=0.1 * args.lr,
     )
 

@@ -10,6 +10,7 @@ from ..modeling.gpt2 import (
     GPT2PipelineForwards,
     get_gpt2_flash_attention_forward,
     get_gpt_model_forward_for_flash_attn,
+    get_jit_fused_gpt2_mlp_forward,
     get_lm_forward_with_dist_cross_entropy,
     gpt2_sequence_parallel_forward_fn,
 )
@@ -36,10 +37,13 @@ class GPT2Policy(Policy):
         """
         self.tie_weight = self.tie_weight_check()
         self.origin_attn_implement = self.model.config._attn_implementation
+        self.enable_bias_gelu_fused = (
+            self.shard_config.enable_jit_fused and self.model.config.activation_function == "gelu"
+        )
         return self.model
 
     def module_policy(self):
-        from transformers.models.gpt2.modeling_gpt2 import GPT2Attention, GPT2Block, GPT2Model
+        from transformers.models.gpt2.modeling_gpt2 import GPT2MLP, GPT2Attention, GPT2Block, GPT2Model
 
         ATTN_IMPLEMENTATION = {
             "eager": GPT2Attention,
@@ -61,7 +65,7 @@ class GPT2Policy(Policy):
         else:
             norm_cls = col_nn.LayerNorm
 
-        sp_mode = self.shard_config.sequence_parallelism_mode if self.shard_config.enable_sequence_parallelism else None
+        sp_mode = self.shard_config.sequence_parallelism_mode or None
         assert sp_mode != "all_to_all", "all_to_all sequence parallelism is not supported for GPT2"
         if sp_mode == "ring":
             warnings.warn(
@@ -80,6 +84,9 @@ class GPT2Policy(Policy):
                 self.shard_config.enable_flash_attention = False
                 use_flash_attention = False
         if self.shard_config.enable_tensor_parallelism:
+            assert (
+                self.model.config.num_attention_heads % self.shard_config.tensor_parallel_size == 0
+            ), f"The number of attention heads must be divisible by tensor parallel size."
             policy[GPT2Model] = ModulePolicyDescription(
                 sub_module_replacement=[
                     SubModuleReplacementDescription(
@@ -119,6 +126,7 @@ class GPT2Policy(Policy):
                             "n_fused": 1,
                             "seq_parallel_mode": sp_mode,
                             "overlap": overlap,
+                            "skip_bias_add": self.enable_bias_gelu_fused,
                         },
                     ),
                     SubModuleReplacementDescription(
@@ -142,6 +150,14 @@ class GPT2Policy(Policy):
                     ),
                 ],
             )
+            if self.enable_bias_gelu_fused:
+                self.append_or_create_method_replacement(
+                    description={
+                        "forward": get_jit_fused_gpt2_mlp_forward(),
+                    },
+                    policy=policy,
+                    target_key=GPT2MLP,
+                )
         if embedding_cls is not None:
             # padding vocabulary size when using pp to make it divisible by  shard_config.make_vocab_size_divisible_by
             self.append_or_create_submodule_replacement(

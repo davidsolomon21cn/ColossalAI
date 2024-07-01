@@ -7,7 +7,7 @@ from torch.distributed import ProcessGroup
 
 from colossalai.pipeline.stage_manager import PipelineStageManager
 
-from .grad_ckpt_config import GradientCheckpointConfig, PipelineGradientCheckpointConfig
+from .grad_ckpt_config import GradientCheckpointConfig
 
 __all__ = ["ShardConfig"]
 SUPPORT_SP_MODE = ["split_gather", "ring", "all_to_all"]
@@ -46,6 +46,7 @@ class ShardConfig:
     make_vocab_size_divisible_by: int = 64
     gradient_checkpoint_config: Optional[GradientCheckpointConfig] = None
     extra_kwargs: Dict[str, Any] = field(default_factory=dict)
+    ep_group: Optional[ProcessGroup] = None
     # pipeline_parallel_size: int
     # data_parallel_size: int
     # tensor_parallel_mode: Literal['1d', '2d', '2.5d', '3d']
@@ -105,16 +106,6 @@ class ShardConfig:
         else:
             self._sequence_parallel_size = dist.get_world_size(self.sequence_parallel_process_group)
 
-        if (
-            self.pipeline_stage_manager is not None
-            and isinstance(self.gradient_checkpoint_config, PipelineGradientCheckpointConfig)
-            and self.gradient_checkpoint_config._customize_num_layers_per_stage
-        ):
-            self.pipeline_stage_manager.set_distribution_config(
-                self.gradient_checkpoint_config.num_model_layers,
-                self.gradient_checkpoint_config.num_layers_per_stage,
-            )
-
     def _turn_on_all_optimization(self):
         """
         Turn on all optimization.
@@ -135,9 +126,3 @@ class ShardConfig:
         # It may also slow down training when seq len is small. Plz enable manually.
         # self.enable_sequence_parallelism = True
         # self.enable_sequence_overlap = True
-
-    def _infer(self):
-        """
-        Set default params for inference.
-        """
-        # assert self.pipeline_stage_manager is None, "pipeline parallelism is not supported in inference for now"

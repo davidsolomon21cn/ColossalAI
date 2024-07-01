@@ -7,7 +7,12 @@ from torch.nn import Module
 
 import colossalai.shardformer.layer as col_nn
 
-from ..modeling.falcon import FalconPipelineForwards, build_falcon_alibi_tensor_fn, get_tp_falcon_decoder_layer_forward
+from ..modeling.falcon import (
+    FalconPipelineForwards,
+    build_falcon_alibi_tensor_fn,
+    get_lm_forward_with_dist_cross_entropy,
+    get_tp_falcon_decoder_layer_forward,
+)
 from .base_policy import ModulePolicyDescription, Policy, SubModuleReplacementDescription
 
 __all__ = ["FalconPolicy"]
@@ -47,6 +52,12 @@ class FalconPolicy(Policy):
                 embedding_cls = col_nn.PaddingEmbedding
 
         if self.shard_config.enable_tensor_parallelism:
+            assert (
+                self.model.config.num_attention_heads % self.shard_config.tensor_parallel_size == 0
+            ), f"The number of attention heads must be divisible by tensor parallel size."
+            assert (
+                self.model.config.num_kv_heads % self.shard_config.tensor_parallel_size == 0
+            ), f"The number of key_value heads must be divisible by tensor parallel size."
             attn_attribute_replacement = {
                 "self_attention.hidden_size": self.model.config.hidden_size // self.shard_config.tensor_parallel_size,
                 "self_attention.split_size": self.model.config.hidden_size // self.shard_config.tensor_parallel_size,
@@ -227,12 +238,19 @@ class FalconForCausalLMPolicy(FalconPolicy):
                     suffix="lm_head",
                     target_module=col_nn.VocabParallelLMHead1D,
                     kwargs=dict(
-                        gather_output=True, make_vocab_size_divisible_by=self.shard_config.make_vocab_size_divisible_by
+                        gather_output=not self.shard_config.parallel_output,
+                        make_vocab_size_divisible_by=self.shard_config.make_vocab_size_divisible_by,
                     ),
                 ),
                 policy=policy,
                 target_key=FalconForCausalLM,
             )
+            if self.shard_config.parallel_output:
+                method_replacement = {"forward": get_lm_forward_with_dist_cross_entropy(self.shard_config)}
+                self.append_or_create_method_replacement(
+                    description=method_replacement, policy=policy, target_key=FalconForCausalLM
+                )
+
         else:
             self.append_or_create_submodule_replacement(
                 description=SubModuleReplacementDescription(

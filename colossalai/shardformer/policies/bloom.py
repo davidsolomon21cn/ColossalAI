@@ -11,13 +11,13 @@ import colossalai.shardformer.layer as col_nn
 from ..modeling.bloom import (
     BloomPipelineForwards,
     build_bloom_alibi_tensor_fn,
-    get_bloom_flash_attention_forward,
     get_bloom_sequence_parallel_forward_fn,
     get_jit_fused_bloom_attention_forward,
     get_jit_fused_bloom_gelu_forward,
     get_jit_fused_bloom_mlp_forward,
+    get_lm_forward_with_dist_cross_entropy,
 )
-from ..modeling.jit import get_dropout_add_func, get_jit_fused_dropout_add_func, get_jit_fused_gelu_forward_func
+from ..modeling.jit import get_jit_fused_dropout_add_func, get_jit_fused_gelu_forward_func
 from .base_policy import ModulePolicyDescription, Policy, SubModuleReplacementDescription
 
 
@@ -49,7 +49,7 @@ class BloomPolicy(Policy):
         else:
             norm_cls = col_nn.LayerNorm
 
-        sp_mode = self.shard_config.sequence_parallelism_mode if self.shard_config.enable_sequence_parallelism else None
+        sp_mode = self.shard_config.sequence_parallelism_mode or None
         assert sp_mode != "all_to_all", "all_to_all sequence parallelism is not supported for BLOOM"
         if sp_mode == "ring":
             warnings.warn(
@@ -61,6 +61,9 @@ class BloomPolicy(Policy):
         sp_partial_derived = sp_mode == "split_gather"
 
         if self.shard_config.enable_tensor_parallelism:
+            assert (
+                self.model.config.n_head % self.shard_config.tensor_parallel_size == 0
+            ), f"The number of attention heads must be divisible by tensor parallel size."
             policy[BloomBlock] = ModulePolicyDescription(
                 attribute_replacement={
                     "self_attention.hidden_size": self.model.config.hidden_size
@@ -159,16 +162,6 @@ class BloomPolicy(Policy):
                 description={"forward": get_bloom_sequence_parallel_forward_fn(self.shard_config)},
                 policy=policy,
                 target_key=BloomModel,
-            )
-
-        if self.shard_config.enable_flash_attention:
-            self.append_or_create_method_replacement(
-                description={
-                    "forward": get_bloom_flash_attention_forward(),
-                    "dropout_add": get_dropout_add_func(),
-                },
-                policy=policy,
-                target_key=BloomAttention,
             )
 
         # enable jit fused operator
@@ -284,12 +277,18 @@ class BloomForCausalLMPolicy(BloomPolicy):
                     suffix="lm_head",
                     target_module=col_nn.VocabParallelLMHead1D,
                     kwargs=dict(
-                        gather_output=True, make_vocab_size_divisible_by=self.shard_config.make_vocab_size_divisible_by
+                        gather_output=not self.shard_config.parallel_output,
+                        make_vocab_size_divisible_by=self.shard_config.make_vocab_size_divisible_by,
                     ),
                 ),
                 policy=policy,
                 target_key=BloomForCausalLM,
             )
+            if self.shard_config.parallel_output:
+                method_replacement = {"forward": get_lm_forward_with_dist_cross_entropy(self.shard_config)}
+                self.append_or_create_method_replacement(
+                    description=method_replacement, policy=policy, target_key=BloomForCausalLM
+                )
         else:
             self.append_or_create_submodule_replacement(
                 description=SubModuleReplacementDescription(

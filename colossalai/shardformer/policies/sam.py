@@ -1,5 +1,3 @@
-import warnings
-
 import colossalai.shardformer.layer as col_nn
 
 from ..modeling.sam import forward_fn
@@ -31,6 +29,9 @@ class SamPolicy(Policy):
             norm_cls = col_nn.LayerNorm
 
         if self.shard_config.enable_tensor_parallelism:
+            assert (
+                self.model.config.vision_config.num_attention_heads % self.shard_config.tensor_parallel_size == 0
+            ), f"The number of attention heads must be divisible by tensor parallel size."
             policy[SamVisionLayer] = ModulePolicyDescription(
                 attribute_replacement={
                     "attn.num_attention_heads": self.model.config.vision_config.num_attention_heads
@@ -208,24 +209,6 @@ class SamPolicy(Policy):
             policy=policy,
             target_key=SamTwoWayTransformer,
         )
-
-        # use flash attention
-        if self.shard_config.enable_flash_attention:
-            warnings.warn("Flash attention is not supported in SAM model. Fallback to normal attention.")
-            # self.append_or_create_method_replacement(
-            #     description={
-            #         "forward": get_sam_flash_attention_forward(),
-            #     },
-            #     policy=policy,
-            #     target_key=SamAttention,
-            # )
-            # self.append_or_create_method_replacement(
-            #     description={
-            #         "forward": get_sam_vision_flash_attention_forward(),
-            #     },
-            #     policy=policy,
-            #     target_key=SamVisionAttention,
-            # )
 
         return policy
 

@@ -1,11 +1,14 @@
 import argparse
 import resource
+import time
+import warnings
 from contextlib import nullcontext
 
 import torch
+import torch.distributed as dist
 from data_utils import RandomDataset
 from model_utils import format_numel_str, get_model_numel
-from performance_evaluator import PerformanceEvaluator
+from performance_evaluator import PerformanceEvaluator, get_profile_context
 from torch.distributed.fsdp.fully_sharded_data_parallel import CPUOffload, MixedPrecision
 from tqdm import tqdm
 from transformers import AutoConfig, AutoModelForCausalLM
@@ -19,15 +22,20 @@ from colossalai.cluster import DistCoordinator
 from colossalai.lazy import LazyInitContext
 from colossalai.nn.optimizer import HybridAdam
 from colossalai.shardformer import PipelineGradientCheckpointConfig
-from examples.language.data_utils import RandomDataset
-from examples.language.model_utils import format_numel_str, get_model_numel
-from examples.language.performance_evaluator import PerformanceEvaluator
 
+warnings.filterwarnings("ignore")
 # ==============================
 # Constants
 # ==============================
 
 MODEL_CONFIGS = {
+    "100m": LlamaConfig(
+        max_position_embeddings=4096,
+        num_hidden_layers=4,
+        num_attention_heads=32,
+        intermediate_size=2048,
+        hidden_size=1024,
+    ),
     "7b": LlamaConfig(max_position_embeddings=4096),
     "13b": LlamaConfig(
         hidden_size=5120,
@@ -60,6 +68,9 @@ def main():
         default="gemini",
         help="Choose which plugin to use",
     )
+    parser.add_argument(
+        "--overlap", action="store_true", help="Overlap communication with computation in Pipeline Parallel."
+    )
     parser.add_argument("-b", "--batch_size", type=int, default=2, help="Batch size")
     parser.add_argument("-s", "--num_steps", type=int, default=5, help="Number of steps to run")
     parser.add_argument("-i", "--ignore_steps", type=int, default=2, help="Number of steps to ignore")
@@ -74,30 +85,38 @@ def main():
     parser.add_argument("--offload_optim_frac", type=float, default=0.0, help="Offload optim fraction. Only for gemini")
     parser.add_argument("--offload_param_frac", type=float, default=0.0, help="Offload param fraction. Only for gemini")
     parser.add_argument("--tp", type=int, default=1, help="Tensor parallel size")
+    parser.add_argument("--sp", type=int, default=1, help="Sequence parallel size")
     parser.add_argument("--extra_dp", type=int, default=1, help="Extra data parallel size, used for Gemini")
     parser.add_argument("--pp", type=int, default=1, help="Pipeline parallel size")
     parser.add_argument("--mbs", type=int, default=1, help="Micro batch size of pipeline parallel")
     parser.add_argument("--zero", type=int, default=0, help="Zero Stage when hybrid plugin is enabled")
     parser.add_argument("--custom-ckpt", action="store_true", help="Customize checkpoint", default=False)
+
+    parser.add_argument("--pp_style", default="1f1b", choices=["1f1b", "interleaved"])
+    parser.add_argument("--n_chunks", default=1, help="number of model chunks", type=eval)
+    parser.add_argument("--profile", action="store_true", help="Profile the code", default=False)
+    parser.add_argument("--disable-async-reduce", action="store_true", help="Disable the asynchronous reduce operation")
+    parser.add_argument("--prefetch_num", type=int, default=0, help="chunk prefetch max number")
+    parser.add_argument("--no_cache", action="store_true")
     args = parser.parse_args()
 
-    colossalai.launch_from_torch({})
+    colossalai.launch_from_torch()
     coordinator = DistCoordinator()
 
     def empty_init():
         pass
 
     # ckpt config for LLaMA3-70B on 64 H100 GPUs
-    ckpt_config = (
-        PipelineGradientCheckpointConfig(
-            num_stages=args.pp,
-            num_model_chunks=1,
-            num_model_layers=80,
-            num_layers_per_stage=[19, 20, 20, 21],
-            num_ckpt_layers_per_stage=[19, 19, 19, 13],
-        )
+    hybrid_kwargs = (
+        {
+            "gradient_checkpoint_config": PipelineGradientCheckpointConfig(
+                num_ckpt_layers_per_stage=[19, 19, 19, 13],
+            ),
+            "num_layers_per_stage": [19, 20, 20, 21],
+            "pp_style": "interleaved",
+        }
         if args.custom_ckpt
-        else None
+        else {}
     )
 
     # ==============================
@@ -114,6 +133,8 @@ def main():
             extra_dp_size=args.extra_dp,
             enable_fused_normalization=torch.cuda.is_available(),
             enable_flash_attention=args.xformers,
+            max_prefetch=args.prefetch_num,
+            enable_async_reduce=not args.disable_async_reduce,
         )
     elif args.plugin == "gemini_auto":
         plugin = GeminiPlugin(
@@ -123,6 +144,8 @@ def main():
             tp_size=args.tp,
             extra_dp_size=args.extra_dp,
             enable_fused_normalization=torch.cuda.is_available(),
+            max_prefetch=args.prefetch_num,
+            enable_async_reduce=not args.disable_async_reduce,
             enable_flash_attention=args.xformers,
         )
     elif args.plugin == "fsdp":
@@ -167,18 +190,26 @@ def main():
         plugin = HybridParallelPlugin(
             tp_size=args.tp,
             pp_size=args.pp,
+            pp_style=args.pp_style,
+            num_model_chunks=args.n_chunks,
             zero_stage=args.zero,
+            sp_size=args.sp,
+            enable_sequence_parallelism=args.sp > 1,
             enable_fused_normalization=torch.cuda.is_available(),
             enable_flash_attention=args.xformers,
             microbatch_size=args.mbs,
             precision="bf16",
             dp_outside=False,
-            gradient_checkpoint_config=ckpt_config,
+            overlap_p2p=args.overlap,
+            enable_metadata_cache=not args.no_cache,
+            **hybrid_kwargs,
         )
     elif args.plugin == "3d_cpu":
         plugin = HybridParallelPlugin(
             tp_size=args.tp,
             pp_size=args.pp,
+            pp_style=args.pp_style,
+            num_model_chunks=args.n_chunks,
             zero_stage=args.zero,
             cpu_offload=True,
             enable_fused_normalization=torch.cuda.is_available(),
@@ -186,6 +217,7 @@ def main():
             microbatch_size=args.mbs,
             initial_scale=2**8,
             precision="bf16",
+            overlap_p2p=args.overlap,
         )
     else:
         raise ValueError(f"Unknown plugin {args.plugin}")
@@ -201,10 +233,11 @@ def main():
         config = MODEL_CONFIGS[args.config]
     else:
         config = AutoConfig.from_pretrained(args.config, trust_remote_code=True)
+    torch.cuda.manual_seed(42)
     dataset = RandomDataset(
         num_samples=args.batch_size * args.num_steps * dp_size, max_length=args.max_length, vocab_size=config.vocab_size
     )
-    dataloader = plugin.prepare_dataloader(dataset, batch_size=args.batch_size, shuffle=True, drop_last=True)
+    dataloader = plugin.prepare_dataloader(dataset, batch_size=args.batch_size, shuffle=True, drop_last=True, seed=42)
 
     # ==============================
     # Initialize Model and Optimizer
@@ -220,8 +253,13 @@ def main():
         init_kwargs["empty_init"] = False
 
     with init_ctx:
-        model = AutoModelForCausalLM.from_config(config, trust_remote_code=True, **init_kwargs)
-
+        model = AutoModelForCausalLM.from_config(
+            config,
+            trust_remote_code=True,
+            **init_kwargs,
+            attn_implementation="flash_attention_2",
+            torch_dtype=torch.bfloat16,
+        )
     if args.grad_checkpoint:
         model.gradient_checkpointing_enable()
         if config.model_type == "chatglm":
@@ -242,6 +280,7 @@ def main():
     optimizer = HybridAdam(model.parameters())
     torch.set_default_dtype(torch.bfloat16)
     model, optimizer, _, dataloader, _ = booster.boost(model, optimizer, dataloader=dataloader)
+
     torch.set_default_dtype(torch.float)
     coordinator.print_on_master(
         f"Booster init max CUDA memory: {get_accelerator().max_memory_allocated()/1024**2:.2f} MB"
@@ -250,25 +289,42 @@ def main():
         f"Booster init max CPU memory: {resource.getrusage(resource.RUSAGE_SELF).ru_maxrss/1024:.2f} MB"
     )
 
-    if isinstance(plugin, HybridParallelPlugin) and args.pp > 1:
-        data_iter = iter(dataloader)
-        for step in tqdm(range(len(dataloader)), desc="Step", disable=not coordinator.is_master()):
-            performance_evaluator.on_step_start(step)
-            booster.execute_pipeline(
-                data_iter, model, criterion=lambda outputs, inputs: outputs[0], optimizer=optimizer, return_loss=False
-            )
-            optimizer.step()
-            optimizer.zero_grad()
-            performance_evaluator.on_step_end(input_ids=torch.empty(args.batch_size, args.max_length))
-    else:
-        for step, batch in enumerate(tqdm(dataloader, desc="Step", disable=not coordinator.is_master())):
-            performance_evaluator.on_step_start(step)
-            outputs = model(**batch)
-            loss = outputs[0]
-            booster.backward(loss, optimizer)
-            optimizer.step()
-            optimizer.zero_grad()
-            performance_evaluator.on_step_end(**batch)
+    with get_profile_context(
+        args.profile,
+        args.ignore_steps,
+        len(dataloader) - 1,
+        save_dir=f"profile/{time.strftime('%H:%M', time.localtime())}-{args.plugin}-llama-{args.config}",
+    ) as prof:
+        if isinstance(plugin, HybridParallelPlugin) and args.pp > 1:
+            data_iter = iter(dataloader)
+            for step in tqdm(range(len(dataloader)), desc="Step", disable=not coordinator.is_master()):
+                performance_evaluator.on_step_start(step)
+                outputs = booster.execute_pipeline(
+                    data_iter,
+                    model,
+                    criterion=lambda outputs, inputs: outputs[0],
+                    optimizer=optimizer,
+                    return_loss=True,
+                )
+                loss = outputs["loss"]
+                if dist.get_rank() == dist.get_world_size() - 1:
+                    print(f"Step {step} loss: {loss}")
+                optimizer.step()
+                optimizer.zero_grad()
+
+                performance_evaluator.on_step_end(input_ids=torch.empty(args.batch_size, args.max_length))
+                prof.step()
+        else:
+            for step, batch in enumerate(tqdm(dataloader, desc="Step", disable=not coordinator.is_master())):
+                performance_evaluator.on_step_start(step)
+                outputs = model(**batch)
+                loss = outputs[0]
+                booster.backward(loss, optimizer)
+                optimizer.step()
+                optimizer.zero_grad()
+
+                performance_evaluator.on_step_end(**batch)
+                prof.step()
 
     performance_evaluator.on_fit_end()
     coordinator.print_on_master(f"Max CUDA memory usage: {get_accelerator().max_memory_allocated()/1024**2:.2f} MB")

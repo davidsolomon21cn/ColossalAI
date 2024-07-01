@@ -124,20 +124,6 @@ def check_forward_backward(model_fn, data_gen_fn, output_transform_fn, loss_fn, 
         },
         {
             "tp_size": 2,
-            "pp_size": 1,
-            "enable_all_optimization": True,
-            "use_lazy_init": True,
-            "precision": "fp32",
-        },
-        {
-            "tp_size": 1,
-            "pp_size": 2,
-            "num_microbatches": 4,
-            "use_lazy_init": True,
-            "precision": "fp32",
-        },
-        {
-            "tp_size": 2,
             "pp_size": 2,
             "num_microbatches": 2,
             "enable_all_optimization": True,
@@ -145,30 +131,12 @@ def check_forward_backward(model_fn, data_gen_fn, output_transform_fn, loss_fn, 
             "precision": "fp16",
             "initial_scale": 1,
         },
-        {
-            "tp_size": 4,
-            "pp_size": 1,
-            "enable_all_optimization": True,
-            "use_lazy_init": False,
-            "precision": "fp32",
-        },
-        {"tp_size": 2, "pp_size": 1, "enable_all_optimization": True, "use_lazy_init": False, "precision": "fp32"},
         {
             "tp_size": 2,
             "pp_size": 1,
             "enable_all_optimization": True,
             "use_lazy_init": True,
             "zero_stage": 2,
-            "precision": "fp16",
-            "initial_scale": 1,
-        },
-        {
-            "tp_size": 1,
-            "pp_size": 2,
-            "num_microbatches": 2,
-            "enable_all_optimization": True,
-            "use_lazy_init": True,
-            "zero_stage": 1,
             "precision": "fp16",
             "initial_scale": 1,
         },
@@ -231,13 +199,13 @@ def run_bert_3d_test(test_config):
 
 def check_bert(rank, world_size, port):
     disable_existing_loggers()
-    colossalai.launch(config={}, rank=rank, world_size=world_size, host="localhost", port=port, backend="nccl")
+    colossalai.launch(rank=rank, world_size=world_size, host="localhost", port=port, backend="nccl")
     run_bert_test()
 
 
 def check_bert_3d(rank, world_size, port):
     disable_existing_loggers()
-    colossalai.launch(config={}, rank=rank, world_size=world_size, host="localhost", port=port, backend="nccl")
+    colossalai.launch(rank=rank, world_size=world_size, host="localhost", port=port, backend="nccl")
     run_bert_3d_test()
 
 

@@ -21,6 +21,7 @@ from ..modeling.jit import get_jit_fused_dropout_add_func
 from ..modeling.opt import (
     OPTPipelineForwards,
     get_jit_fused_opt_decoder_layer_forward,
+    get_lm_forward_with_dist_cross_entropy,
     get_opt_decoder_forward_for_flash_attention,
     get_opt_flash_attention_forward,
 )
@@ -76,6 +77,9 @@ class OPTPolicy(Policy):
             warnings.warn("OPT doesn't support sequence parallelism now, will ignore the sequence parallelism flag.")
 
         if self.shard_config.enable_tensor_parallelism:
+            assert (
+                self.model.config.num_attention_heads % self.shard_config.tensor_parallel_size == 0
+            ), f"The number of attention heads must be divisible by tensor parallel size."
             policy[OPTDecoderLayer] = ModulePolicyDescription(
                 sub_module_replacement=[
                     SubModuleReplacementDescription(
@@ -266,12 +270,18 @@ class OPTForCausalLMPolicy(OPTPolicy):
                     suffix="lm_head",
                     target_module=VocabParallelLMHead1D,
                     kwargs=dict(
-                        gather_output=True, make_vocab_size_divisible_by=self.shard_config.make_vocab_size_divisible_by
+                        gather_output=not self.shard_config.parallel_output,
+                        make_vocab_size_divisible_by=self.shard_config.make_vocab_size_divisible_by,
                     ),
                 ),
                 policy=policy,
                 target_key=OPTForCausalLM,
             )
+            if self.shard_config.parallel_output:
+                method_replacement = {"forward": get_lm_forward_with_dist_cross_entropy(self.shard_config)}
+                self.append_or_create_method_replacement(
+                    description=method_replacement, policy=policy, target_key=OPTForCausalLM
+                )
         else:
             self.append_or_create_submodule_replacement(
                 description=SubModuleReplacementDescription(

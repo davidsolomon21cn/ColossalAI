@@ -389,6 +389,7 @@ class GPT2PipelineForwards:
                     shift_labels,
                     process_group=shard_config.tensor_parallel_process_group,
                     vocab_size=self.lm_head.out_features,
+                    dtype=self.transformer.dtype,
                 )
             else:
                 loss = loss_fct(shift_logits, shift_labels)
@@ -737,7 +738,10 @@ class GPT2PipelineForwards:
             sequence_lengths = -1
         else:
             if input_ids is not None:
-                sequence_lengths = (torch.ne(input_ids, self.config.pad_token_id).sum(-1) - 1).to(logits.device)
+                # if no pad token found, use modulo instead of reverse indexing for ONNX compatibility
+                sequence_lengths = torch.eq(input_ids, self.config.pad_token_id).int().argmax(-1) - 1
+                sequence_lengths = sequence_lengths % input_ids.shape[-1]
+                sequence_lengths = sequence_lengths.to(logits.device)
             else:
                 sequence_lengths = -1
                 logger.warning_once(
@@ -1294,6 +1298,7 @@ def get_lm_forward_with_dist_cross_entropy(shard_config: ShardConfig):
                 shift_labels,
                 process_group=shard_config.tensor_parallel_process_group,
                 vocab_size=self.lm_head.out_features,
+                dtype=self.transformer.dtype,
             )
 
         if not return_dict:
@@ -1308,5 +1313,20 @@ def get_lm_forward_with_dist_cross_entropy(shard_config: ShardConfig):
             attentions=transformer_outputs.attentions,
             cross_attentions=transformer_outputs.cross_attentions,
         )
+
+    return forward
+
+
+def get_jit_fused_gpt2_mlp_forward():
+    from transformers.models.gpt2.modeling_gpt2 import GPT2MLP
+
+    from colossalai.kernel.jit.bias_gelu import GeLUFunction as JitGeLUFunction
+
+    def forward(self: GPT2MLP, hidden_states: Optional[Tuple[torch.FloatTensor]]) -> torch.FloatTensor:
+        hidden_states, bias = self.c_fc(hidden_states)
+        hidden_states = JitGeLUFunction.apply(hidden_states, bias)
+        hidden_states = self.c_proj(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+        return hidden_states
 
     return forward

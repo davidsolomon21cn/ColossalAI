@@ -1,10 +1,12 @@
 import ctypes
 import random
 import warnings
+from collections import defaultdict
 from contextlib import contextmanager
+from copy import deepcopy
 from functools import partial
 from types import MethodType
-from typing import Any, Callable, Iterator, List, Optional, OrderedDict, Tuple, Union
+from typing import Any, Callable, Dict, Iterator, List, Optional, OrderedDict, Tuple, Union
 
 import numpy as np
 import torch
@@ -24,6 +26,8 @@ from colossalai.amp.naive_amp.mixed_precision_optimizer import MixedPrecisionOpt
 from colossalai.checkpoint_io import CheckpointIO, HybridParallelCheckpointIO
 from colossalai.cluster import ProcessGroupMesh
 from colossalai.interface import AMPModelMixin, ModelWrapper, OptimizerWrapper
+from colossalai.interface.optimizer import DistributedOptim
+from colossalai.nn.optimizer import DistGaloreAwamW, cast_to_distributed
 from colossalai.pipeline.schedule import InterleavedSchedule, OneForwardOneBackwardSchedule
 from colossalai.pipeline.stage_manager import PipelineStageManager
 from colossalai.shardformer import GradientCheckpointConfig, ShardConfig, ShardFormer
@@ -651,7 +655,6 @@ class HybridParallelZeroOptimizer(LowLevelZeroOptimizer):
         self.param_info = param_info
         self.stage_manager = model.stage_manager
         self.shared_params = model.shared_params
-        self.dp_pg = dp_process_group
         self.tp_pg = tp_process_group
         self.pp_pg = pp_process_group
         if use_pipeline:
@@ -714,7 +717,7 @@ class HybridParallelZeroOptimizer(LowLevelZeroOptimizer):
             """Retrieve all working gradients from different parameter groups."""
             all_working_grads = []
             for group_id in range(self.num_param_groups):
-                working_grads = self._grad_store.get_working_grads_by_group_id(group_id)
+                working_grads = self.get_working_grads_by_group_id(group_id)
                 all_working_grads.extend(working_grads)
             return all_working_grads
 
@@ -722,7 +725,7 @@ class HybridParallelZeroOptimizer(LowLevelZeroOptimizer):
             """Identify gradients to be synchronized in the sequence parallelism."""
             grads_to_sync = []
             for grad in all_working_grads:
-                param_id_for_grad = self._grad_store.get_param_id_for_grad(grad)
+                param_id_for_grad = self.get_param_id_for_grad(grad)
                 param_for_grad = ctypes.cast(param_id_for_grad, ctypes.py_object).value
                 if SeqParallelUtils.is_sp_partial_derived_param(param_for_grad):
                     grads_to_sync.append(grad)
@@ -791,7 +794,7 @@ class HybridParallelZeroOptimizer(LowLevelZeroOptimizer):
             # If gradient synchronization is is not required, return.
             return
 
-    def _compute_grad_norm(self, gradients: List[Tensor], norm_type: int = 2) -> float:
+    def _compute_grad_norm(self, dp_pg, gradients: List[Tensor], norm_type: int = 2) -> float:
         r"""
         Compute and return the gradient norm for gradient clipping.
 
@@ -807,7 +810,7 @@ class HybridParallelZeroOptimizer(LowLevelZeroOptimizer):
         if len(gradients) == 0:
             return 0.0
 
-        dp_size = get_world_size(self.dp_pg) if self.dp_pg is not None else 1
+        dp_size = get_world_size(dp_pg) if dp_pg is not None else 1
         tp_size = get_world_size(self.tp_pg) if self.tp_pg is not None else 1
         pp_size = get_world_size(self.pp_pg) if self.pp_pg is not None else 1
         norm_type = float(norm_type)
@@ -838,7 +841,7 @@ class HybridParallelZeroOptimizer(LowLevelZeroOptimizer):
                 # However, we still perform the 'all_reduce' operation for the sake of good coding practices.
                 # To ensure mathematical equivalence, we divide the 'grad_norm' by 'tp_size.'
                 if tp_size > 1:
-                    param_id_for_grad = self._grad_store.get_param_id_for_grad(grad)
+                    param_id_for_grad = self.get_param_id_for_grad(grad)
                     param_for_grad = ctypes.cast(param_id_for_grad, ctypes.py_object).value
 
                     if not is_distributed_tensor(param_for_grad):
@@ -852,7 +855,7 @@ class HybridParallelZeroOptimizer(LowLevelZeroOptimizer):
                     for shared_param in self.shared_params:
                         if self.stage_manager.stage in shared_param:
                             stage_shared_param = shared_param[self.stage_manager.stage]
-                            working_grad = self._grad_store.get_working_grad_by_param_id(id(stage_shared_param))
+                            working_grad = self.get_working_grad_by_param_id(id(stage_shared_param))
                             if grad is working_grad:
                                 grad_norm_exponentiated /= len(shared_param)
 
@@ -863,7 +866,7 @@ class HybridParallelZeroOptimizer(LowLevelZeroOptimizer):
             )
             if dp_size > 1:
                 # compute norm in dp process group
-                dist.all_reduce(tensor=total_norm_exponentiated_cuda, op=dist.ReduceOp.SUM, group=self.dp_pg)
+                dist.all_reduce(tensor=total_norm_exponentiated_cuda, op=dist.ReduceOp.SUM, group=dp_pg)
             if tp_size > 1:
                 # compute norm in tp process group
                 dist.all_reduce(tensor=total_norm_exponentiated_cuda, op=dist.ReduceOp.SUM, group=self.tp_pg)
@@ -942,7 +945,7 @@ class HybridParallelPlugin(PipelinePluginBase):
         gradient_checkpoint_config (GradientCheckpointConfig, optional): Configuration for gradient checkpointing. Defaults to None.
         enable_metadata_cache (bool, optional): Whether to enable metadata cache for pipeline parallelism. Defaults to True.
         make_vocab_size_divisible_by (int, optional): it's used when padding the vocabulary size, to make it choose an faster kenel. Default to 64.
-
+        overlap_p2p (bool, optional): Whether to overlap the p2p communication in pipeline parallelism
     """
 
     def __init__(
@@ -983,10 +986,12 @@ class HybridParallelPlugin(PipelinePluginBase):
         custom_policy: Policy = None,
         pp_style: str = "1f1b",
         num_model_chunks: int = 1,
+        num_layers_per_stage: Optional[List[int]] = None,
         gradient_checkpoint_config: Optional[GradientCheckpointConfig] = None,
         enable_metadata_cache: bool = True,
         make_vocab_size_divisible_by: int = 64,
         dp_outside: bool = True,
+        overlap_p2p: bool = True,
     ) -> None:
         super().__init__()
         assert (
@@ -994,7 +999,9 @@ class HybridParallelPlugin(PipelinePluginBase):
         ), f"World size {dist.get_world_size()} is not divisible by tp_size {tp_size} * pp_size {pp_size}"
 
         if enable_sequence_parallelism:
-            self.sequence_parallelism_mode = sequence_parallelism_mode if sequence_parallelism_mode is not None else "1"
+            self.sequence_parallelism_mode = (
+                sequence_parallelism_mode if sequence_parallelism_mode is not None else "all_to_all"
+            )
             assert (
                 self.sequence_parallelism_mode in SUPPORT_SP_MODE
             ), f"Sequence parallelism mode {self.sequence_parallelism_mode} is not in the supported list {SUPPORT_SP_MODE}"
@@ -1009,19 +1016,13 @@ class HybridParallelPlugin(PipelinePluginBase):
                 self.sp_size = 1
                 self.dp_size = dist.get_world_size() // (tp_size * pp_size)
             elif self.sequence_parallelism_mode in ["all_to_all"]:
-                assert (
-                    tp_size == 1
-                ), f"Sequence parallelism mode {self.sequence_parallelism_mode} cannot be used with tensor parallelism"
-                assert (
-                    pp_size == 1
-                ), f"Sequence parallelism mode {self.sequence_parallelism_mode} cannot be used with pipeline parallelism"
-                self.sp_size = dist.get_world_size() if sp_size is None else sp_size
-                self.dp_size = dist.get_world_size() // (self.sp_size * pp_size)
+                self.sp_size = 1 if sp_size is None else sp_size
+                self.dp_size = dist.get_world_size() // (self.sp_size * pp_size * tp_size)
         else:
             self.dp_size = dist.get_world_size() // (tp_size * pp_size)
             assert (
                 sp_size == 1 or sp_size is None
-            ), f"sp_size can only be set to a >1 number when enable_sequence_parallelism is True"
+            ), f"You should not set sp_size when sequence parallelism is not enabled."
             self.sp_size = 1
 
         self.tp_size = tp_size
@@ -1035,11 +1036,22 @@ class HybridParallelPlugin(PipelinePluginBase):
         self.enable_jit_fused = enable_jit_fused
         self.enable_sequence_parallelism = enable_sequence_parallelism
         if dp_outside:
-            self.dp_axis, self.pp_axis, self.tp_axis, self.sp_axis = 0, 1, 2, 3
+            (
+                self.dp_axis,
+                self.pp_axis,
+                self.tp_axis,
+                self.sp_axis,
+            ) = (
+                0,
+                1,
+                2,
+                3,
+            )
             self.pg_mesh = ProcessGroupMesh(self.dp_size, self.pp_size, self.tp_size, self.sp_size)
         else:
             self.pp_axis, self.dp_axis, self.tp_axis, self.sp_axis = 0, 1, 2, 3
             self.pg_mesh = ProcessGroupMesh(self.pp_size, self.dp_size, self.tp_size, self.sp_size)
+
         self.stage_manager = None
         self.schedule = None
         self.custom_policy = custom_policy
@@ -1050,12 +1062,15 @@ class HybridParallelPlugin(PipelinePluginBase):
             assert (
                 num_microbatches is not None or microbatch_size is not None
             ), "num_microbatches or microbatch_size must be specified when using pipeline parallelism"
-            assert self.zero_stage <= 1, "zero stage must be 0 or 1 when using pipeline parallelism"
+            assert (
+                self.zero_stage <= 1
+            ), "To avoid prohibitive gradient synchronization costs, zero stage must be 0 or 1 when using pipeline parallelism"
             self.stage_manager = PipelineStageManager(
                 self.pg_mesh,
                 pipeline_axis=self.pp_axis,
                 enable_interleave=pp_style == "interleaved",
                 num_model_chunks=num_model_chunks,
+                num_layers_per_stage=num_layers_per_stage,
             )
 
             if pp_style == "interleaved":
@@ -1066,6 +1081,7 @@ class HybridParallelPlugin(PipelinePluginBase):
                     num_microbatch=num_microbatches,
                     microbatch_size=microbatch_size,
                     enable_metadata_cache=enable_metadata_cache,
+                    overlap_p2p=overlap_p2p,
                 )
             elif pp_style == "1f1b":
                 self.schedule = OneForwardOneBackwardSchedule(
@@ -1154,6 +1170,9 @@ class HybridParallelPlugin(PipelinePluginBase):
     def support_no_sync(self) -> bool:
         return True
 
+    def support_lora(self) -> bool:
+        return False
+
     def control_checkpoint_io(self) -> bool:
         return True
 
@@ -1166,6 +1185,19 @@ class HybridParallelPlugin(PipelinePluginBase):
         lr_scheduler: Optional[LRScheduler] = None,
     ) -> Tuple[Module, OptimizerWrapper, Callable, DataLoader, LRScheduler]:
         param_info = get_param_info(optimizer)
+
+        # TODO: Support Galore + ZeRO
+        zero_stage = self.zero_stage
+        zero_config = deepcopy(self.zero_config)
+
+        # Replace with distributed implementation if exists
+        optimizer = cast_to_distributed(optimizer)
+
+        if isinstance(optimizer, DistGaloreAwamW) and zero_stage > 0 and self.dp_size > 0:
+            warnings.warn("Galore is only supported for Tensor Parallel and vanilla Data Parallel yet. Disabling ZeRO.")
+            zero_config["partition_grad"] = False
+            zero_stage = 0
+
         if not isinstance(model, ModelWrapper):
             use_ddp = (self.dp_size > 1 and self.pp_size == 1 and self.zero_stage == 0) or (
                 self.dp_size == 1
@@ -1189,7 +1221,8 @@ class HybridParallelPlugin(PipelinePluginBase):
                 custom_policy=self.custom_policy,
             )
         if optimizer is not None and not isinstance(optimizer, OptimizerWrapper):
-            if self.zero_stage == 0:
+            if zero_stage == 0:
+                is_zero = False
                 if self.precision in ["fp16", "bf16"]:
                     optimizer = HybridParallelAMPOptimizer(
                         optimizer,
@@ -1213,11 +1246,11 @@ class HybridParallelPlugin(PipelinePluginBase):
                         tp_process_group=self.tp_group,
                     )
             else:
-                zero_dp_size = dist.get_world_size(dp_group)
-                if zero_dp_size == 1:
+                is_zero = self.dp_size > 1
+                if self.dp_size == 1:
                     warnings.warn(
                         "Use Zero Optimizer when data parallel size is 1 may introduce unnecessary overhead. "
-                        "If you are not intended to use cpu_offload, please consider set zero_stage=0."
+                        "If you do not intend to use cpu_offload, please consider set zero_stage=0."
                     )
 
                 assert self.precision != "fp32", "Please set precision to 'fp16' or 'bf16' when using ZeRO."
@@ -1231,11 +1264,19 @@ class HybridParallelPlugin(PipelinePluginBase):
                     pp_process_group=self.pp_group,
                     verbose=True,
                     clip_grad_norm=self.max_norm,
-                    **self.zero_config,
+                    **zero_config,
                     **self.amp_config,
                 )
             # inject update_master_params
             model.update_master_params = MethodType(optimizer.update_master_params, model)
+
+            # Setup optimizers that require global states
+            optim = optimizer.optim
+            if isinstance(optim, DistributedOptim):
+                shard_to_param = optimizer.get_master_to_working_map() if is_zero else {}
+                padding_map = optimizer.get_param_padding_map() if is_zero else defaultdict(int)
+                optim.setup_distributed(self.tp_group, self.dp_group, shard_to_param, padding_map, is_zero)
+
         return model, optimizer, criterion, dataloader, lr_scheduler
 
     def execute_pipeline(
@@ -1354,3 +1395,8 @@ class HybridParallelPlugin(PipelinePluginBase):
             self.zero_stage != 2
         ), "ZERO2 is not compatible with no_sync function, please run gradient accumulation with gradient synchronization allowed."
         return optimizer.no_sync() if isinstance(optimizer, HybridParallelZeroOptimizer) else model.no_sync()
+
+    def enable_lora(
+        self, model: Module, pretrained_dir: Optional[str] = None, lora_config: Optional[Dict] = None
+    ) -> Module:
+        raise NotImplementedError

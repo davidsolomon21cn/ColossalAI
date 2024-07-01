@@ -9,6 +9,7 @@
    <a href="https://www.colossalai.org/"> 文档 </a> |
    <a href="https://github.com/hpcaitech/ColossalAI/tree/main/examples"> 例程 </a> |
    <a href="https://github.com/hpcaitech/ColossalAI/discussions"> 论坛 </a> |
+   <a href="https://cloud.luchentech.com/">潞晨云 </a> |
    <a href="https://hpc-ai.com/blog"> 博客 </a></h3>
 
    [![GitHub Repo stars](https://img.shields.io/github/stars/hpcaitech/ColossalAI?style=social)](https://github.com/hpcaitech/ColossalAI/stargazers)
@@ -24,14 +25,14 @@
 </div>
 
 ## 新闻
+* [2024/06] [Open-Sora Continues Open Source: Generate Any 16-Second 720p HD Video with One Click, Model Weights Ready to Use](https://hpc-ai.com/blog/open-sora-from-hpc-ai-tech-team-continues-open-source-generate-any-16-second-720p-hd-video-with-one-click-model-weights-ready-to-use)
+* [2024/05] [Large AI Models Inference Speed Doubled, Colossal-Inference Open Source Release](https://hpc-ai.com/blog/colossal-inference)
+* [2024/04] [Open-Sora Unveils Major Upgrade: Embracing Open Source with Single-Shot 16-Second Video Generation and 720p Resolution](https://hpc-ai.com/blog/open-soras-comprehensive-upgrade-unveiled-embracing-16-second-video-generation-and-720p-resolution-in-open-source)
+* [2024/04] [Most cost-effective solutions for inference, fine-tuning and pretraining, tailored to LLaMA3 series](https://hpc-ai.com/blog/most-cost-effective-solutions-for-inference-fine-tuning-and-pretraining-tailored-to-llama3-series)
 * [2024/03] [314 Billion Parameter Grok-1 Inference Accelerated by 3.8x, Efficient and Easy-to-Use PyTorch+HuggingFace version is Here](https://hpc-ai.com/blog/314-billion-parameter-grok-1-inference-accelerated-by-3.8x-efficient-and-easy-to-use-pytorchhuggingface-version-is-here)
 * [2024/03] [Open-Sora: Revealing Complete Model Parameters, Training Details, and Everything for Sora-like Video Generation Models](https://hpc-ai.com/blog/open-sora-v1.0)
 * [2024/03] [Open-Sora：Sora Replication Solution with 46% Cost Reduction, Sequence Expansion to Nearly a Million](https://hpc-ai.com/blog/open-sora)
 * [2024/01] [Inference Performance Improved by 46%, Open Source Solution Breaks the Length Limit of LLM for Multi-Round Conversations](https://hpc-ai.com/blog/Colossal-AI-SwiftInfer)
-* [2024/01] [Construct Refined 13B Private Model With Just $5000 USD, Upgraded Colossal-AI Llama-2 Open Source](https://hpc-ai.com/blog/colossal-llama-2-13b)
-* [2023/11] [Enhanced MoE Parallelism, Open-source MoE Model Training Can Be 9 Times More Efficient](https://www.hpc-ai.tech/blog/enhanced-moe-parallelism-open-source-moe-model-training-can-be-9-times-more-efficient)
-* [2023/09] [One Half-Day of Training Using a Few Hundred Dollars Yields Similar Results to Mainstream Large Models, Open-Source and Commercial-Free Domain-Specific LLM Solution](https://www.hpc-ai.tech/blog/one-half-day-of-training-using-a-few-hundred-dollars-yields-similar-results-to-mainstream-large-models-open-source-and-commercial-free-domain-specific-llm-solution)
-* [2023/09] [70 Billion Parameter LLaMA2 Model Training Accelerated by 195%](https://www.hpc-ai.tech/blog/70b-llama2-training)
 * [2023/07] [HPC-AI Tech Raises 22 Million USD in Series A Funding](https://www.hpc-ai.tech/blog/hpc-ai-tech-raises-22-million-usd-in-series-a-funding-to-fuel-team-expansion-and-business-growth)
 
 ## 目录
@@ -72,11 +73,9 @@
 <li>
    <a href="#推理">推理</a>
    <ul>
+     <li><a href="#Colossal-Inference">Colossal-Inference: AI大模型推理速度翻倍</a></li>
      <li><a href="#Grok-1">Grok-1: 3140亿参数PyTorch + HuggingFace推理</a></li>
      <li><a href="#SwiftInfer">SwiftInfer:打破LLM多轮对话的长度限制，推理加速46%</a></li>
-     <li><a href="#GPT-3-Inference">GPT-3</a></li>
-     <li><a href="#OPT-Serving">1750亿参数OPT在线推理服务</a></li>
-     <li><a href="#BLOOM-Inference">1760亿参数 BLOOM</a></li>
    </ul>
  </li>
  <li>
@@ -126,17 +125,21 @@ Colossal-AI 为您提供了一系列并行组件。我们的目标是让您的�
 
 [Open-Sora](https://github.com/hpcaitech/Open-Sora)：全面开源类Sora模型参数和所有训练细节
 [[代码]](https://github.com/hpcaitech/Open-Sora)
-[[博客]](https://hpc-ai.com/blog/open-sora-v1.0)
-[[模型权重]](https://huggingface.co/hpcai-tech/Open-Sora)
+[[博客]](https://hpc-ai.com/blog/open-sora-from-hpc-ai-tech-team-continues-open-source-generate-any-16-second-720p-hd-video-with-one-click-model-weights-ready-to-use)
+[[模型权重]](https://github.com/hpcaitech/Open-Sora?tab=readme-ov-file#model-weights)
 [[演示样例]](https://github.com/hpcaitech/Open-Sora?tab=readme-ov-file#-latest-demo)
+[[潞晨云]](https://cloud.luchentech.com/)
+[[OpenSora镜像]](https://cloud.luchentech.com/doc/docs/image/open-sora/)
 
 <div align="center">
-   <a href="https://www.bilibili.com/video/BV1dW421c7MN">
-   <img src="https://raw.githubusercontent.com/hpcaitech/public_assets/main/applications/sora/sora-demo-cn.png" width="700" />
+   <a href="https://www.bilibili.com/video/BV1Fm421G7bV">
+   <img src="https://raw.githubusercontent.com/hpcaitech/public_assets/main/applications/sora/opensora-v1.2.png" width="700" />
    </a>
 </div>
 
 ### Colossal-LLaMA-2
+[[潞晨云]](https://cloud.luchentech.com/)
+[[LLaMA3 镜像]](https://cloud.luchentech.com/doc/docs/image/llama)
 
 - 7B：千元预算半天训练，效果媲美主流大模型，开源可商用中文LLaMA-2
 [[代码]](https://github.com/hpcaitech/ColossalAI/tree/main/applications/Colossal-LLaMA-2)
@@ -267,7 +270,9 @@ Colossal-AI 为您提供了一系列并行组件。我们的目标是让您的�
 </p>
 
 - 700亿参数LLaMA3训练加速18%
-[[code]](https://github.com/hpcaitech/ColossalAI/tree/main/examples/language/llama)
+[[代码]](https://github.com/hpcaitech/ColossalAI/tree/main/examples/language/llama)
+[[潞晨云]](https://cloud.luchentech.com/)
+[[LLaMA3 镜像]](https://cloud.luchentech.com/doc/docs/image/llama)
 
 ### LLaMA2
 <p align="center">
@@ -368,6 +373,21 @@ Colossal-AI 为您提供了一系列并行组件。我们的目标是让您的�
 
 
 ## 推理
+### Colossal-Inference
+<p align="center">
+<img src="https://raw.githubusercontent.com/hpcaitech/public_assets/main/colossalai/img/inference/colossal-inference-v1-1.png" width=1000/>
+</p>
+
+<p align="center">
+<img src="https://raw.githubusercontent.com/hpcaitech/public_assets/main/colossalai/img/inference/colossal-inference-v1-2.png" width=1000/>
+</p>
+
+ - AI大模型推理速度部分接近翻倍，与vLLM的离线推理性能相比
+[[代码]](https://github.com/hpcaitech/ColossalAI/tree/main/colossalai/inference)
+[[博客]](https://hpc-ai.com/blog/colossal-inference)
+[[潞晨云]](https://cloud.luchentech.com/)
+[[LLaMA3 镜像]](https://cloud.luchentech.com/doc/docs/image/llama)
+
 ### Grok-1
 <p id="Grok-1" align="center">
 <img src="https://raw.githubusercontent.com/hpcaitech/public_assets/main/examples/images/grok-1-inference.jpg" width=600/>
@@ -386,32 +406,13 @@ Colossal-AI 为您提供了一系列并行组件。我们的目标是让您的�
 
 - [SwiftInfer](https://github.com/hpcaitech/SwiftInfer): 开源解决方案打破了多轮对话的 LLM 长度限制，推理性能提高了46%
 
-
-<p id="GPT-3-Inference" align="center">
-<img src="https://raw.githubusercontent.com/hpcaitech/public_assets/main/colossalai/img/inference_GPT-3.jpg" width=800/>
-</p>
-
-- [Energon-AI](https://github.com/hpcaitech/EnergonAI) ：用相同的硬件推理加速50%
-
-<p id="OPT-Serving" align="center">
-<img src="https://raw.githubusercontent.com/hpcaitech/public_assets/main/colossalai/img/BLOOM%20serving.png" width=600/>
-</p>
-
-- [OPT推理服务](https://colossalai.org/docs/advanced_tutorials/opt_service): 体验1750亿参数OPT在线推理服务
-
-<p id="BLOOM-Inference" align="center">
-<img src="https://raw.githubusercontent.com/hpcaitech/public_assets/main/colossalai/img/BLOOM%20Inference.PNG" width=800/>
-</p>
-
-- [BLOOM](https://github.com/hpcaitech/EnergonAI/tree/main/examples/bloom): 降低1760亿参数BLOOM模型部署推理成本超10倍
-
 <p align="right">(<a href="#top">返回顶端</a>)</p>
 
 ## 安装
 
 环境要求:
 
-- PyTorch >= 1.11 并且 PyTorch <= 2.1
+- PyTorch >= 2.1
 - Python >= 3.7
 - CUDA >= 11.0
 - [NVIDIA GPU Compute Capability](https://developer.nvidia.com/cuda-gpus) >= 7.0 (V100/RTX20 and higher)

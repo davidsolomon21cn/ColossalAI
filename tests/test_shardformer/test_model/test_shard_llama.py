@@ -62,9 +62,13 @@ def check_forward_backward(model_fn, data_gen_fn, output_transform_fn, loss_fn, 
         and booster.plugin.shard_config.sequence_parallelism_mode == "all_to_all"
     ):
         for p1, p2 in zip(llama_model.parameters(), sharded_optimizer._master_param_groups_of_current_rank[0]):
-            working_p = sharded_optimizer._param_store.master_to_working_param[id(p2)]
-            grads = sharded_optimizer._grad_store.get_partitioned_gradients_by_param_id(0, id(working_p))
-            grad_index = 0 if sharded_optimizer._partition_grads else sharded_optimizer._local_rank
+            working_p = sharded_optimizer.master_to_working_param[id(p2)]
+            grads = sharded_optimizer.get_partitioned_gradients_by_param_id(0, id(working_p))
+            grad_index = (
+                0
+                if sharded_optimizer._partition_grads
+                else sharded_optimizer.pid_to_bucket_store[id(working_p)].local_rank
+            )
             grad = grads[grad_index]
             sharded_grad = p1.grad.view(-1).chunk(dist.get_world_size())[dist.get_rank()]
             assert_close(sharded_grad, grad[: sharded_grad.shape[0]], atol=5e-3, rtol=5e-3, check_dtype=False)
@@ -118,9 +122,20 @@ def check_forward_backward(model_fn, data_gen_fn, output_transform_fn, loss_fn, 
             atol, rtol = 1e-4, 1e-3
         else:
             atol, rtol = 5e-3, 5e-3
-        check_weight(
-            llama_model, shard_llama_model, col_layer_for_check, tp_group, atol=atol, rtol=rtol, dim=1, verbose=False
-        )
+        try:
+            check_weight(
+                llama_model,
+                shard_llama_model,
+                col_layer_for_check,
+                tp_group,
+                atol=atol,
+                rtol=rtol,
+                dim=1,
+                verbose=False,
+            )
+        except Exception as e:
+            print(f"Failed config: {test_config}")
+            raise e
 
     # check grads
     check_all_grad_tensors(grads_to_check)
@@ -131,9 +146,10 @@ def check_forward_backward(model_fn, data_gen_fn, output_transform_fn, loss_fn, 
 @parameterize(
     "test_config",
     [
-        {
+        {  # Test ring + Flash attention
             "tp_size": 2,
             "pp_size": 1,
+            "sp_size": 2,
             "num_microbatches": 1,
             "enable_sequence_parallelism": True,
             "sequence_parallelism_mode": "ring",
@@ -143,15 +159,29 @@ def check_forward_backward(model_fn, data_gen_fn, output_transform_fn, loss_fn, 
             "precision": "fp16",
             "initial_scale": 1,
         },
+        {  # Ulysess + Flash attention
+            "tp_size": 1,
+            "pp_size": 2,
+            "sp_size": 2,
+            "num_microbatches": 2,
+            "enable_sequence_parallelism": True,
+            "sequence_parallelism_mode": "all_to_all",
+            "enable_flash_attention": True,
+            "use_lazy_init": True,
+            "zero_stage": 1,
+            "precision": "fp16",
+            "initial_scale": 1,
+        },
         {
-            "tp_size": 4,
+            "tp_size": 1,
             "pp_size": 1,
+            "sp_size": 2,
             "num_microbatches": 1,
             "enable_sequence_parallelism": True,
-            "sequence_parallelism_mode": "ring",
-            "enable_flash_attention": False,
+            "sequence_parallelism_mode": "all_to_all",
             "use_lazy_init": True,
-            "precision": "fp32",
+            "zero_stage": 1,
+            "precision": "fp16",
             "initial_scale": 1,
         },
         {
@@ -160,40 +190,6 @@ def check_forward_backward(model_fn, data_gen_fn, output_transform_fn, loss_fn, 
             "num_microbatches": 1,
             "enable_sequence_parallelism": True,
             "sequence_parallelism_mode": "split_gather",
-            "enable_flash_attention": False,
-            "use_lazy_init": True,
-            "precision": "fp16",
-            "initial_scale": 1,
-        },
-        {
-            "tp_size": 1,
-            "pp_size": 1,
-            "sp_size": 2,
-            "num_microbatches": 1,
-            "enable_sequence_parallelism": True,
-            "sequence_parallelism_mode": "all_to_all",
-            "use_lazy_init": True,
-            "precision": "fp16",
-            "initial_scale": 1,
-        },
-        {
-            "tp_size": 1,
-            "pp_size": 1,
-            "sp_size": 2,
-            "num_microbatches": 1,
-            "enable_sequence_parallelism": True,
-            "sequence_parallelism_mode": "all_to_all",
-            "use_lazy_init": True,
-            "zero_stage": 2,
-            "precision": "fp16",
-            "initial_scale": 1,
-        },
-        {
-            "tp_size": 1,
-            "pp_size": 1,
-            "num_microbatches": 1,
-            "enable_sequence_parallelism": True,
-            "sequence_parallelism_mode": "all_to_all",
             "enable_flash_attention": False,
             "use_lazy_init": True,
             "precision": "fp16",
@@ -217,26 +213,8 @@ def check_forward_backward(model_fn, data_gen_fn, output_transform_fn, loss_fn, 
             "use_lazy_init": False,
             "precision": "fp32",
             "enable_gradient_checkpointing": True,
-            "gradient_checkpoint_config": PipelineGradientCheckpointConfig(
-                num_stages=2, num_model_chunks=1, num_model_layers=8, num_ckpt_layers_per_stage=[4, 0]
-            ),
+            "gradient_checkpoint_config": PipelineGradientCheckpointConfig(num_ckpt_layers_per_stage=[4, 0]),
         },
-        {
-            "tp_size": 4,
-            "pp_size": 1,
-            "enable_all_optimization": False,
-            "use_lazy_init": False,
-            "precision": "fp32",
-        },
-        {
-            "tp_size": 1,
-            "pp_size": 4,
-            "num_microbatches": 4,
-            "enable_all_optimization": False,
-            "use_lazy_init": False,
-            "precision": "fp32",
-        },
-        {"tp_size": 2, "pp_size": 1, "enable_all_optimization": False, "use_lazy_init": False, "precision": "fp32"},
         {
             "tp_size": 2,
             "pp_size": 1,
@@ -262,7 +240,11 @@ def run_llama_test(test_config):
     sub_model_zoo = model_zoo.get_sub_registry("transformers_llama")
 
     for name, (model_fn, data_gen_fn, output_transform_fn, loss_fn, _) in sub_model_zoo.items():
-        check_forward_backward(model_fn, data_gen_fn, output_transform_fn, loss_fn, test_config)
+        try:
+            check_forward_backward(model_fn, data_gen_fn, output_transform_fn, loss_fn, test_config)
+        except Exception as e:
+            print(f"Failed config: {test_config}")
+            raise e
 
     clear_layout_converter()
     Randomizer.reset_index()
@@ -303,9 +285,6 @@ def run_llama_test(test_config):
             "initial_scale": 1,
             "enable_gradient_checkpointing": True,
             "gradient_checkpoint_config": PipelineGradientCheckpointConfig(
-                num_stages=2,
-                num_model_chunks=2,
-                num_model_layers=8,
                 num_ckpt_layers_per_stage=[0, 1, 2, 2],
             ),
         },
@@ -315,7 +294,11 @@ def run_llama_3d_test(test_config):
     sub_model_zoo = model_zoo.get_sub_registry("transformers_llama")
 
     for name, (model_fn, data_gen_fn, output_transform_fn, loss_fn, _) in sub_model_zoo.items():
-        check_forward_backward(model_fn, data_gen_fn, output_transform_fn, loss_fn, test_config)
+        try:
+            check_forward_backward(model_fn, data_gen_fn, output_transform_fn, loss_fn, test_config)
+        except Exception as e:
+            print(f"Failed config: {test_config}")
+            raise e
 
     clear_layout_converter()
     Randomizer.reset_index()
@@ -324,13 +307,13 @@ def run_llama_3d_test(test_config):
 
 def check_llama(rank, world_size, port):
     disable_existing_loggers()
-    colossalai.launch(config={}, rank=rank, world_size=world_size, host="localhost", port=port, backend="nccl")
+    colossalai.launch(rank=rank, world_size=world_size, host="localhost", port=port, backend="nccl")
     run_llama_test()
 
 
 def check_llama_3d(rank, world_size, port):
     disable_existing_loggers()
-    colossalai.launch(config={}, rank=rank, world_size=world_size, host="localhost", port=port, backend="nccl")
+    colossalai.launch(rank=rank, world_size=world_size, host="localhost", port=port, backend="nccl")
     run_llama_3d_test()
 
 

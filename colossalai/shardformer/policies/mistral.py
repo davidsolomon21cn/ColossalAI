@@ -18,6 +18,7 @@ from colossalai.shardformer.layer import (
 
 from ..modeling.mistral import (
     MistralForwards,
+    get_lm_forward_with_dist_cross_entropy,
     get_mistral_flash_attention_forward,
     get_mistral_model_forward_for_flash_attn,
 )
@@ -41,11 +42,13 @@ class MistralPolicy(Policy):
             MistralDecoderLayer,
             MistralFlashAttention2,
             MistralModel,
+            MistralSdpaAttention,
         )
 
         ATTN_IMPLEMENTATION = {
             "eager": MistralAttention,
             "flash_attention_2": MistralFlashAttention2,
+            "sdpa": MistralSdpaAttention,
         }
 
         policy = {}
@@ -66,6 +69,12 @@ class MistralPolicy(Policy):
             )
 
         if self.shard_config.enable_tensor_parallelism:
+            assert (
+                self.model.config.num_attention_heads % self.shard_config.tensor_parallel_size == 0
+            ), f"The number of attention heads must be divisible by tensor parallel size."
+            assert (
+                self.model.config.num_key_value_heads % self.shard_config.tensor_parallel_size == 0
+            ), f"The number of key_value heads must be divisible by tensor parallel size."
             decoder_attribute_replacement = {
                 "self_attn.hidden_size": self.model.config.hidden_size // self.shard_config.tensor_parallel_size,
                 "self_attn.num_heads": self.model.config.num_attention_heads // self.shard_config.tensor_parallel_size,
@@ -269,14 +278,18 @@ class MistralForCausalLMPolicy(MistralPolicy):
                         SubModuleReplacementDescription(
                             suffix="lm_head",
                             target_module=VocabParallelLMHead1D,
-                            kwargs=dict(
-                                gather_output=True,
-                                make_vocab_size_divisible_by=self.shard_config.make_vocab_size_divisible_by,
-                            ),
+                            kwargs={
+                                "gather_output": not self.shard_config.parallel_output,
+                                "make_vocab_size_divisible_by": self.shard_config.make_vocab_size_divisible_by,
+                            },
                         )
                     ]
                 )
             }
+            if self.shard_config.parallel_output:
+                new_item[MistralForCausalLM].method_replacement = {
+                    "forward": get_lm_forward_with_dist_cross_entropy(self.shard_config)
+                }
         else:
             new_item = {
                 MistralForCausalLM: ModulePolicyDescription(
